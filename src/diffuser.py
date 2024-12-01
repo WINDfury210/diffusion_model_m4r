@@ -1,7 +1,6 @@
 import numpy as np
 from sklearn.mixture import GaussianMixture
 from scipy.stats import multivariate_normal
-from sklearn.cluster import KMeans
 
 
 class Diffuser:
@@ -24,7 +23,8 @@ class Diffuser:
         self.num_steps = int(T / dt)
         self.model = model
 
-    def fit_gmm(self, data, n_components='Auto'):
+
+    def fit_gmm(self, data, n_components):
         """
         Fit a Gaussian Mixture Model (GMM) to the provided data.
         
@@ -32,68 +32,68 @@ class Diffuser:
         - data: The data to fit the GMM to (any dimensionality).
         - n_components: Number of components for the GMM. If 'Auto', it determines based on clusters in data.
         """
-        original_shape = data.shape
-        flat_data = data.reshape(-1, data.shape[-1])  # Flatten the data if it's multi-dimensional
-
-        if n_components == 'Auto':
-            kmeans = KMeans(n_clusters='auto', random_state=42)  # Adjust to your preferred method for auto-detection
-            kmeans.fit(flat_data)
-            n_components = len(np.unique(kmeans.labels_))
-
-        self.model = GaussianMixture(n_components=n_components, covariance_type='full', random_state=42)
+        
+        flat_data = data.reshape(data.shape[0], -1)
+        self.model = GaussianMixture(n_components=n_components, covariance_type='full')
         self.model.fit(flat_data)
 
     
-    def gmm_log_gradient(self, x):
+    def gmm_log_gradient(self, x, covariance_type='full'):
         """
         Compute the gradient of the log of the GMM PDF at a given point.
 
         Parameters:
         - x: A (..., d) array of points where the gradient should be evaluated.
+        - covariance_type: The type of covariance matrix ('full' or 'diag').
 
         Returns:
         - grad_log_pdf: The gradient of the log PDF at each point, reshaped to match x.
         """
         epsilon = 1e-6
         original_shape = x.shape
-        flat_x = x.flatten()  # Flatten to (n_samples, d)
+        flat_x = x.reshape(x.shape[0], -1)
 
         means = self.model.means_
-        covariances = self.model.covariances_
         weights = self.model.weights_
 
-        # Compute the difference between the data points and the means
-        diff = flat_x[np.newaxis, :] - means  # Shape: (n_samples, n_components, d)
-        
-        # Inverse covariance matrix
-        inv_cov = np.linalg.inv(covariances + epsilon * np.eye(covariances.shape[-1]))
+        if covariance_type == 'full':
+            covariances = self.model.covariances_
+            inv_cov = np.linalg.inv(covariances + epsilon * np.eye(covariances.shape[-1]))
+            diff = flat_x[np.newaxis, :, :] - means[:, np.newaxis, :]
+            grad = np.matmul(diff, inv_cov)
+        elif covariance_type == 'diag':
+            diag_covariances = self.model.covariances_
+            inv_diag_cov = 1 / (diag_covariances + epsilon)
+            diff = flat_x[np.newaxis, :, :] - means[:, np.newaxis, :]
+            grad = diff * inv_diag_cov[:, np.newaxis, :]
+        else:
+            raise ValueError("Invalid covariance_type: {}".format(covariance_type))
 
-        # Compute the gradient
-        grad = np.matmul(diff, inv_cov)  # Shape: (n_samples, n_components, d)
-
-        # Compute the PDF values for each component and data point
         pdf_values = np.zeros((means.shape[0], flat_x.shape[0]))
         for k in range(means.shape[0]):
-            pdf_values[k, :] = multivariate_normal.pdf(flat_x, mean=means[k], cov=covariances[k])
+            if covariance_type == 'full':
+                pdf_values[k, :] = multivariate_normal.pdf(flat_x, mean=means[k], cov=covariances[k])
+            elif covariance_type == 'diag':
+                var_diag = diag_covariances[k]
+                norm_factor = np.prod(np.sqrt(2 * np.pi * var_diag))
+                norm_factor = np.maximum(norm_factor, epsilon)
+                exp_term = -0.5 * np.sum((diff[k] ** 2) * inv_diag_cov[k], axis=1)
+                exp_term = np.clip(exp_term, -1e6, 1e6)
+                pdf_values[k, :] = np.exp(exp_term) / norm_factor
 
-        # Weighted gradient
-        weighted_grad = np.sum(-weights[:, np.newaxis] * grad * pdf_values[:, :, np.newaxis], axis=1)  # Shape: (n_samples, d)
+        weighted_grad = np.sum(-weights[:, np.newaxis, np.newaxis] * grad * pdf_values[:, :, np.newaxis], axis=0)
 
-        # Compute the overall probability for each sample
         p = np.sum(weights[:, np.newaxis] * pdf_values, axis=0)
-        p = np.maximum(p, epsilon)  # Avoid division by zero
+        p = np.maximum(p, epsilon)
 
-        # Compute the final gradient of the log PDF
         grad_log_pdf_flat = weighted_grad / p[:, np.newaxis]
-
-        # Reshape the gradient to the original shape
         grad_log_pdf = grad_log_pdf_flat.reshape(original_shape)
 
         return grad_log_pdf
 
 
 
-    def simulate(self, x0=None):
+    def simulate(self, x0=None, **kwargs):
         """
         Simulate the forward diffusion process using the Euler-Maruyama method.
         
@@ -103,6 +103,7 @@ class Diffuser:
         Returns:
         - trajectory: The simulated trajectory of the diffusion process.
         """
+        
         num_steps = self.num_steps
         if x0 is None:
             x0 = self.x0.copy()
@@ -119,7 +120,7 @@ class Diffuser:
         
         return trajectory
 
-    def backward_simulate(self, x0, dt, T):
+    def backward_simulate(self, x0, dt, T, **kwargs):
         """
         Simulate the backward diffusion process using the reverse of the forward process.
         
@@ -137,7 +138,7 @@ class Diffuser:
         sigma = self.sigma
         
         for t in range(num_steps):
-            grad_log_pdf = self.gmm_log_gradient(x)
+            grad_log_pdf = self.gmm_log_gradient(x, covariance_type=kwargs.get('covariance_type', 'full'))
             dx = (beta(x, t) - sigma(x, t) ** 2 - grad_log_pdf) * dt
             dw = sigma(x, t) * np.random.randn(*x.shape) * np.sqrt(dt)
             x -= (dx + dw)

@@ -39,10 +39,10 @@ def fit_image(directory, n_components=5, store_path=False):
     images_array = np.vstack(images)
     
     # Fit the GMM using the flattened image vectors
-    gmm = GaussianMixture(n_components=n_components, random_state=42)
+    gmm = GaussianMixture(n_components=n_components, covariance_type='diag', random_state=42)
     gmm.fit(images_array)
     if store_path:
-        store_gmm_model(gmm, f"/Users/apple/Desktop/IC/700/M4R/codes/models/{store_path}.joblib")
+        store_gmm_model(gmm, f"/Users/apple/Desktop/IC/700/M4R/diffusion_model_m4r/models/{store_path}.joblib")
     else:
         return gmm
 
@@ -79,6 +79,7 @@ def store_gmm_model(gmm, model_filename):
     - gmm: The fitted GaussianMixture model.
     - model_filename: The filename to save the model to.
     """
+    os.makedirs(os.path.dirname(model_filename), exist_ok=True)
     joblib.dump(gmm, model_filename)
     print(f"GMM model saved as {model_filename}")
 
@@ -96,6 +97,4 @@ def load_gmm_model(model_filename):
     gmm = joblib.load(model_filename)
     print(f"GMM model loaded from {model_filename}")
     return gmm
-
-
 
